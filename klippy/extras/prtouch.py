@@ -16,6 +16,7 @@ class PRTouchCFG:
         self.pi_count = config.getint('pi_count', default=32, minval=16, maxval=128)
         self.min_hold = config.getint('min_hold', default=3000, minval=100, maxval=50000)
         self.max_hold = config.getint('max_hold', default=50000, minval=100, maxval=100000)
+        self.max_force = config.getint('max_force', default=60000, minval=0, maxval=8000000)
         self.sensor_x = config.getfloat('sensor_x', minval=0, maxval=300)
         self.sensor_y = config.getfloat('sensor_y', minval=0, maxval=300)
         self.random_offset = config.getfloat('sensor_random_offset', default=5, minval=0, maxval=10)
@@ -333,6 +334,24 @@ class PRTouchZOffsetWrapper:
         up_all_cnt = up_all_cnt if up_all_cnt < limt_up_cnt else limt_up_cnt
         return (up_min_cnt if up_min_cnt >= 0 else 0), up_all_cnt, True
 
+    def _check_force_limit(self, all_valss):
+        if self.cfg.max_force == 0:
+            return False
+        for i in range(self.obj.hx711s.s_count):
+            if len(all_valss[i]) >= 3 and min([math.fabs(x) for x in all_valss[i][-3:]]) >= self.cfg.max_force:
+                return True
+        return False
+
+    def _stop_on_force_limit(self, step_us):
+        self.obj.dirzctl.check_and_run(0, 0, 0, wait_finish=False)
+        self.obj.hx711s.query_start(self.cfg.pi_count * 2, int(0), del_dirty=False, show_msg=False)
+        self.obj.hx711s.delay_s(0.2)
+        dirzctl_params, dirzctl_start_tick = self.obj.dirzctl.get_params()
+        if dirzctl_params is not None and len(dirzctl_params) == 2:
+            self.obj.dirzctl.check_and_run(1, int(step_us / 2), int(dirzctl_params[0]['step'] - dirzctl_params[1]['step'] + 1))
+        self.pnt_msg('probe_by_step: force above max_force=%d without trigger, stopped' % (self.cfg.max_force))
+        raise self.obj.printer.command_error("""{"code":"key504", "msg":"probe_by_step: Force limit reached without detecting contact, probing stopped."}""")
+
     def probe_by_step(self, rdy_pos, speed_mm, min_dis_mm, min_hold, max_hold, up_after=True):
         self.obj.hx711s.read_base(int(self.cfg.base_count / 2), max_hold)
         step_cnt = int(min_dis_mm / (self.obj.dirzctl.steppers[0].get_step_dist() * self.obj.dirzctl.step_base))
@@ -349,6 +368,8 @@ class PRTouchZOffsetWrapper:
             if all_valss is None or len(all_valss[0]) == 0:
                 self.obj.hx711s.delay_s(0.005)
                 continue
+            if self._check_force_limit(all_valss):
+                self._stop_on_force_limit(step_us)
             unfit_vals, tmp_unfit_vals = self.obj.filter.cal_offset_by_vals(self.obj.hx711s.s_count, all_valss, self.obj.filter.lft_k1_oft, self.cfg.pi_count)
             fit_vals, tmp_fit_vals = self.obj.filter.cal_filter_by_vals(self.obj.hx711s.s_count, all_valss, self.obj.filter.hft_hz, self.obj.filter.lft_k1, self.cfg.pi_count)
             
